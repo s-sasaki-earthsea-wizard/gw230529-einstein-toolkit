@@ -19,11 +19,24 @@ This project adds two new ingredients:
 
 ## Status
 
-Phase 1 (Docker image build) completed. The image builds the Einstein Toolkit
-Kruskal release (ET_2025_05) from source with the Fuka/Kadath initial data
-thorns and the Boost thorn enabled, and `make docker-check` verifies the
-installation — including that the binary links a single MPI stack and that
-MPI ranks actually form one communicator.
+**Phase 3 in progress**: a reduced-resolution (dx=28 M, 0.686x) run on 16 local
+cores, evolving to t=896 M — far enough past the t≈713 M merger to cover
+inspiral, merger and ringdown. It takes about five days.
+
+Completed so far:
+
+- **Phase 1** — Docker image build. The image builds the Einstein Toolkit
+  Kruskal release (ET_2025_05) from source with the Fuka/Kadath initial data
+  thorns and the Boost thorn enabled, and `make docker-check` verifies the
+  installation, including that the binary links a single MPI stack and that
+  MPI ranks actually form one communicator.
+- **Phase 2** — reduced-resolution smoke test at 16 MPI ranks, with checkpoint
+  writing and recovery both demonstrated: 37 GB resident, 43 s/iteration, and
+  an apparent-horizon mass matching the 3.6 M☉ black hole to six digits.
+
+The production run stays on a single node. Multi-node MPI is deliberately
+deferred to a separate experiment after production, so that a learning exercise
+never rides on the run that has to succeed.
 
 See [CLAUDE.md](CLAUDE.md) for the phase plan, technical findings, and the
 cloud execution strategy.
