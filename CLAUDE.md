@@ -132,7 +132,7 @@
 | --- | --- | --- | --- |
 | 0 | プロジェクト初期化・資材調査 | $0 | ✅ 完了 (2026-08-19) |
 | 1 | Docker image ビルド (Fuka 有効化 thornlist) | $0 | ✅ 完了 (2026-08-19、MPI 二重リンク修正込み) |
-| 2 | ローカル低解像度 (dx=28) smoke + **np≥2 checkpoint 検証** | $0 | 🟢 go/no-go 突破 (2026-08-19、np=16 checkpoint 成功)。recover 検証が残り |
+| 2 | ローカル低解像度 (dx=28) smoke + **np≥2 checkpoint 検証** | $0 | ✅ 完了 (2026-08-20、np=16 で write / recover 双方を実証) |
 | 3 | ローカル低解像度 run + 解析パイプライン dry-run (参照データ比較) | $0 | 未着手 |
 | 4 | クラウド Stage 1: 小型 spot で ops loop 検証 (S3 sync / 中断 / 復旧) | $5–15 | 未着手 |
 | 5 | クラウド Stage 2: c7a.48xlarge spot でフル解像度実測 → go/no-go | $10–30 | 未着手 |
@@ -147,12 +147,18 @@ Phase 5 の go/no-go 基準: 実測 sec/iter からの外挿で総額が 300 USD
 | --- | --- | --- |
 | 必要メモリ | 37.066 GByte (Carpet 申告) / RSS 39.1 GiB | 推定 45 GB より良好 |
 | FUKA ID import | 1493 秒 = 24.9 分 (8 レベル合計) | rank 数でのみ短縮可。OpenMP 非対応 |
-| **evolution 速度** | **30 sec/iter** | iter 32→36 の実測。dt = 0.0875 M/iter |
+| **evolution 速度** | **43 sec/iter** | 256 iter 全体の平均。dt = 0.0875 M/iter |
 | checkpoint | **25 GB / 16 ファイル** (rank ごと 1 ファイル) | POSIX lock エラーなし |
 | AH 質量 | m_irreducible = 3.599979 | BH 3.6 M☉ と 6 桁一致 |
 
-**ローカルで 2000 M を完走する場合の外挿**: 30 sec/iter ÷ 0.0875 M/iter
-= 343 秒/M → 2000 M で **約 7.9 日**。GW150914 の stage 分割運用と同程度。
+**ローカルで 2000 M を完走する場合の外挿**: 43 sec/iter ÷ 0.0875 M/iter
+= 493 秒/M → 2000 M で **約 11.4 日**。GW150914 の stage 分割運用と同程度。
+
+**注意**: 当初 30 sec/iter と記録したが、これは iter 32→36 の早期サンプルで
+**平均を 44% 過小評価していた**。run 全体 (3h44m09s) からフェーズを切り出すと、
+起動+ID import+it_0 checkpoint が 2065 秒、残る 11383 秒が 256 iteration。
+終了時 checkpoint を 250〜450 秒のどこに置いても 42.7〜43.5 sec/iter に収まる。
+**短い区間のサンプリングで sec/iter を決めないこと。**
 
 **クラウド側への含意 (Phase 4–6 の計画に反映が必要)**:
 
@@ -180,6 +186,15 @@ Phase 5 の go/no-go 基準: 実測 sec/iter からの外挿で総額が 300 USD
 - ID import 24.9 分 (ローカル) はフル解像度・np=192 でも数十分規模で残る。
   **spot 中断のたびに払わないよう、`IO::checkpoint_ID = "yes"` で
   初期データを checkpoint 化してから本計算に入ること**
+- **【実証済み 2026-08-20】checkpoint からの recover が機能する**。
+  `recover = "autoprobe"` で it_256 を拾い、Kadath import を **0 回**に抑えて
+  iteration 256 (t=22.400 M) から正確に再開。recover 読み込み + 終了時
+  checkpoint 書き込みで 94 秒、cold start の 2065 秒に対し **33 分の節約**。
+  spot 中断からの復帰は成立する
+- **`checkpoint_keep = 2` は run をまたいで効かない**。2 回の run 後に
+  it_0 / it_256 / it_264 の 3 世代 77 GB が残った。フル解像度では
+  1 世代 78 GB なので、**再開のたびに世代が増えてディスクと S3 を圧迫する**。
+  sidecar 側で明示的に世代を刈る運用が要る
 
 ## クラウド実行戦略 (Phase 4–6)
 
