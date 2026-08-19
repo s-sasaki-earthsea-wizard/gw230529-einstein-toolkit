@@ -114,7 +114,16 @@ fi
 CELLS="$(python3 -c "print(int(round(1344.0/float('${DX}'))))")"
 
 OUT_DIR="${REPO_ROOT}/upstream/par-smoke"
-OUT_PAR="${OUT_DIR}/bhns_smoke_dx${DX/./p}_l${LEVELS}$([[ "${CHECKPOINT_ID}" == "yes" ]] && echo "_ckid").par"
+
+# Build the suffix with a plain if rather than `$(cond && echo ...)`: under
+# `set -e` the substitution would exit non-zero whenever the condition is
+# false, taking the whole script with it.
+CKID_SUFFIX=""
+if [[ "${CHECKPOINT_ID}" == "yes" ]]; then
+    CKID_SUFFIX="_ckid"
+fi
+
+OUT_PAR="${OUT_DIR}/bhns_smoke_dx${DX/./p}_l${LEVELS}${CKID_SUFFIX}.par"
 mkdir -p "${OUT_DIR}"
 
 # Rewrite four things relative to the upstream parfile:
