@@ -160,8 +160,22 @@ Phase 5 の go/no-go 基準: 実測 sec/iter からの外挿で総額が 300 USD
   前提にしているが、dx=28 で既に 25 GB。フル解像度 dx=19.2 では
   25 × (28/19.2)³ ≈ **78 GB** になる。`checkpoint_keep = 2` なら
   ディスク上 156 GB (EBS gp3 500 GB には収まる)
-- 78 GB の `aws s3 sync` は gp3 の読み出し帯域律速で 10 分規模。
-  **15–30 分間隔の sync は間隔の大半を占める**ため、cadence の再検討が必要
+- 【対応済み 2026-08-20】78 GB の読み出しは gp3 125 MB/s なら 10.4 分だが、
+  **gp3 の throughput を 1000 MB/s (IOPS 4000) に上げて 1.3 分**にした。
+  追加費用は 30h run で約 1.4 USD。Terraform 側の既定値に反映済み
+- 【対応済み 2026-08-20】**S3 側の checkpoint 蓄積が真のコスト要因だった**。
+  push-only mirror だと 60 世代 × 78 GB = 4.7 TB、lifecycle 到達まで約 25 USD
+  (予算の 8%)。**slot-a / slot-b の 2 面交互書き + `CURRENT` マーカー**方式に
+  変更し、S3 常駐を 156 GB に固定。転送料自体は同一リージョンなので 0
+- 【重要】`CURRENT` マーカーは**千切れた checkpoint の復元事故を防ぐため**。
+  78 GB のアップロード中に spot 中断されると S3 に不完全なセットが残り、
+  `recover = autoprobe` は「最新だから」それを選んでしまう。
+  マーカーはアップロード成功後にのみ書くので、常に完全なセットを指す
+- 【決定 2026-08-20】**checkpoint は 1 時間ごと、sync は 5 分ごと**。
+  78 GB の書き込みは全 rank を 78 秒止めるので、30 分間隔だと wall clock の
+  4.3%、1 時間間隔なら 2.2%。30h run で確定 38 分の節約に対し、中断 1 回
+  あたりの追加ロスは約 15 分。score 9 のプールで中断 1 回以下が見込みなら
+  1 時間が有利。sync は変更が無ければ LIST のみで終わるため短くて構わない
 - spot 中断の 2 分警告で新規 checkpoint を書かない方針は正しい (78 GB は論外)
 - ID import 24.9 分 (ローカル) はフル解像度・np=192 でも数十分規模で残る。
   **spot 中断のたびに払わないよう、`IO::checkpoint_ID = "yes"` で
@@ -180,11 +194,15 @@ Phase 5 の go/no-go 基準: 実測 sec/iter からの外挿で総額が 300 USD
 - **計算**: c7a.48xlarge (192 core / 384 GB) spot 単一ノード。マルチノード /
   EFA 不要。spot 上限価格はオンデマンド (~$9.85/h) を天井、実効 $2–4/h 想定
 - **イメージ配布**: ローカルビルド → ECR push (5–8 GB, ~$0.8/月)
-- **データ正本は S3**: EBS gp3 (500 GB) は作業領域。sidecar タイマーで
-  15–30 分毎に checkpoint + 出力を `aws s3 sync`。spot 中断 (2 分警告) では
-  新規 checkpoint は書かず sync のみ (15 GB 級は 2 分で書けない)
-- **再開**: launch template + user-data (ECR pull → S3 復元 → autoprobe 再開)。
-  当面は手動再投入スクリプト。中断頻発時に ASG (capacity-rebalance) 化を検討
+- **データ正本は S3**: EBS gp3 (500 GB / 1000 MB/s / 4000 IOPS) は作業領域。
+  sidecar タイマーで **5 分毎**に sync、**checkpoint は 1 時間毎**。
+  checkpoint は `slot-a` / `slot-b` の 2 面交互 + `CURRENT` マーカー方式
+  (詳細は Phase 2 実測値の項)。spot 中断 (2 分警告) では新規 checkpoint は
+  書かず sync のみ (78 GB は 2 分で書けない)
+- **再開**: launch template + user-data
+  (ECR pull → `CURRENT` が指すスロットから復元 → autoprobe 再開)。
+  再投入は `make run` (= `terraform apply -var run_enabled=true`) 1 発。
+  中断頻発時に ASG (capacity-rebalance) 化を検討
 - **監視**: SSM Session Manager のみ (inbound port なし)。cron で physical_time /
   メモリを S3 heartbeat に push
 - **コストガードレール**:
