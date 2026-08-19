@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Syota Sasaki
+# GW230529 BH-NS Einstein Toolkit environment
+# =================================================================
+# Usage:
+#   make docker-build   # first build (60-120 min, builds Kruskal from source)
+#   make docker-up      # start in the background (with Jupyter Lab)
+#   make docker-shell   # bash inside the container
+#   make docker-down    # stop
+#
+# Settings can be overridden in .env (see .env.example).
+
+services:
+  et:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Match the host UID/GID to avoid bind-mount permission problems.
+        # The Makefile's docker-build target fills these from `id -u` / `id -g`.
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
+        # make parallelism for the Cactus build. Lower it if gcc gets OOM
+        # killed (roughly 16 GiB per unit of parallelism is needed).
+        MAKE_PARALLEL: ${MAKE_PARALLEL:-8}
+    image: gw230529-et:local
+    container_name: gw230529-et
+
+    # Shared memory for MPICH inter-process communication.
+    # The 64MB default runs out as the rank count and AMR levels grow.
+    shm_size: ${CONTAINER_SHM_SIZE:-4gb}
+
+    # Pin the container to physical cores for NUMA stability.
+    # This host has 16 physical cores / 16 threads.
+    cpuset: ${CONTAINER_CPUSET:-0-15}
+
+    # Memory ceiling for the container. Estimated usage at dx=28 (0.686x)
+    # is around 45 GB.
+    mem_limit: ${CONTAINER_MEM_LIMIT:-80g}
+
+    # Published Jupyter Lab port. 8889 so this can run alongside the
+    # GW150914 container (8888).
+    ports:
+      - "${JUPYTER_PORT:-8889}:8888"
+
+    volumes:
+      # Bind-mount the project root as the container working directory, so
+      # parfiles and the initial data under upstream/ stay editable from the host.
+      - ./:/home/etuser/work
+
+      # Keep simulation output on local SSD rather than the NAS-backed project
+      # directory. Defaults to ${HOME}/gw230529-output when SIM_OUTPUT_DIR is unset.
+      - ${SIM_OUTPUT_DIR:-${HOME}/gw230529-output}:/home/etuser/simulations
+
+      # Dedicated bind mount for checkpoints. The gallery parfile sets
+      # ``IO::checkpoint_dir = "../CHECKPOINTS"`` relative to the run cwd;
+      # Phase 2 adjusts that to resolve under /home/etuser/checkpoints.
+      # Keeping checkpoints separate from diagnostic output and persistent on
+      # the host is what makes mid-run restarts possible.
+      # Defaults to ${HOME}/gw230529-checkpoints when SIM_CHECKPOINT_DIR is unset.
+      - ${SIM_CHECKPOINT_DIR:-${HOME}/gw230529-checkpoints}:/home/etuser/checkpoints
+
+    working_dir: /home/etuser/work
+
+    stdin_open: true
+    tty: true

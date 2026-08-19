@@ -1,0 +1,24 @@
+# Python dependencies (in-container Jupyter Lab + analysis + tests)
+# ---------------------------------------------------------
+# Read by `pip install -r` during the Docker image build.
+# Edit only this file to change versions, then apply with `make docker-rebuild`.
+
+# Jupyter environment (for running notebooks)
+jupyterlab
+notebook
+
+# Numerics and plotting
+matplotlib
+numpy
+scipy
+h5py
+sympy
+
+# Einstein Toolkit output analysis
+kuibit==1.5.0
+
+# Container entrypoint (propagates signals as PID 1)
+dumb-init
+
+# Test framework (unit and smoke tests from Phase 2 onwards)
+pytest

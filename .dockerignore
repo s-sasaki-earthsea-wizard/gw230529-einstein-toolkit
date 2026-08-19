@@ -1,0 +1,46 @@
+# Files excluded from the Docker build context
+# =================================================================
+# The Dockerfile only needs itself, requirements.txt and docker/.
+# Everything else is excluded to keep the build context small.
+# upstream/ in particular holds the 547 MB reference dataset and must
+# never enter the build context.
+
+# Git metadata
+.git/
+.gitignore
+.github/
+
+# Claude Code working records
+.claude/
+.claude-notes/
+.claude-screenshots/
+
+# Upstream ET artifacts (parfile, initial data, 547 MB reference data),
+# bind-mounted at run time instead
+upstream/
+
+# Local environment settings and run-time artifacts
+.env
+simulations/
+checkpoints/
+data/
+reports/
+
+# Reference documents (PDFs are large)
+docs/
+*.pdf
+
+# OS / editor
+.DS_Store
+.vscode/
+
+# Docker / Compose files themselves (not build inputs)
+docker-compose.yml
+
+# Makefiles, tests and parfiles are bind-mounted at run time
+Makefile
+makefiles/
+tests/
+par/
+README.md
+LICENSE
