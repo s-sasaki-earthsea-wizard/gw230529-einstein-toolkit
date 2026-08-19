@@ -1,0 +1,22 @@
+# Claude session notes (not versioned)
+.claude-notes/
+
+# Upstream Einstein Toolkit gallery artifacts (fetched, not redistributed)
+upstream/
+
+# Local configuration / secrets
+.env
+
+# Simulation outputs, checkpoints, analysis products (GB-scale)
+simulations/
+checkpoints/
+data/
+reports/
+
+# Reference documents
+*.pdf
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
