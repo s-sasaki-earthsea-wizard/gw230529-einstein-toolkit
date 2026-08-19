@@ -19,9 +19,27 @@ This project adds two new ingredients:
 
 ## Status
 
-Phase 0 (project initialization and upstream asset survey) completed.
+Phase 1 (Docker image build) completed. The image builds the Einstein Toolkit
+Kruskal release (ET_2025_05) from source with the Fuka/Kadath initial data
+thorns and the Boost thorn enabled, and `make docker-check` verifies the
+installation — including that the binary links a single MPI stack and that
+MPI ranks actually form one communicator.
+
 See [CLAUDE.md](CLAUDE.md) for the phase plan, technical findings, and the
 cloud execution strategy.
+
+## Quick start
+
+```sh
+make docker-build   # build the image (60-120 min on first run)
+make docker-up      # start the container
+make docker-check   # verify the toolkit installation
+make help           # list all targets
+```
+
+Running a simulation additionally needs the upstream gallery artifacts in
+`upstream/` (see the table in [CLAUDE.md](CLAUDE.md)); they are not
+redistributed here.
 
 ## Upstream attribution
 

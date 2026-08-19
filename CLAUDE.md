@@ -62,11 +62,35 @@
 
 1. **Llama 不使用のため GW150914 で苦労した grid 制約
    (sphere_inner_radius / inter-patch 境界) は存在しない**。
-   解像度ノブは `coordbase::dx` のみ。制約は `1344/dx` が整数になること。
-   - dx=24.0 → 0.80× (推定 ~72 GB)
-   - **dx=28.0 → 0.686× (推定 ~45 GB) ← ローカル開発用に採用決定**
-   - dx=33.6 → 0.571× (推定 ~26 GB、フォールバック)
-   - メモリ推定は公式 140 GB × f³ の外挿。要実測
+   解像度ノブは `coordbase::dx` のみ。制約は 2 つ:
+   - **(a) `1344/dx` が整数**になること (粗グリッドが ±672 M のため)
+   - **(b) 粗グリッドのセル数が MPI rank 数の 3D 分割に耐えること** (Phase 1 実測)。
+     Carpet は `1344/dx` セルを 3 次元に分割し、各 chunk が
+     `Carpet::ghost_size = 3` より広い必要がある。足りないと初期化時に
+     `The grid structure is inconsistent.` (ml=0 rl=0) で abort する。
+     **実測: dx=67.2 (20 セル) は np=4 で通り np=16 で失敗**。
+     dx と rank 数は独立に決められない
+   - **(c) dx を粗くすると refinement box が「痩せる」** (Phase 1 実測)。
+     `Carpetregrid2::radius_*[N]` は M 単位で固定 (300, 150, 75, 37.5, 20, 15, 10)
+     なので、dx を上げてもボックスの物理サイズは変わらず**セル数だけ減る**。
+     `ghost_size = 3` と prolongation buffer を引くと有効領域が消え、
+     初期データが健全でも evolution 1 歩目で NaN になる
+     (`GRHayL: u^0 evaluated to NaN`)。**dx=67.2 で実際に発生**
+
+   | dx | 粗グリッド | level 1 の dx | level 1 のセル数 (直径 600 M) | 推定メモリ |
+   | --- | --- | --- | --- | --- |
+   | 19.2 (上流) | 70 | 9.6 | 62 | 140 GB (公式実測) |
+   | 24.0 | 56 | 12.0 | 50 | ~72 GB |
+   | **28.0** | **48** | **14.0** | **43** | **37.1 GB (実測)** ← 採用 |
+   | 33.6 | 40 | 16.8 | 36 | ~26 GB |
+   | 67.2 | 20 | 33.6 | 17 | 11.6 GB — **NaN で失敗。使用不可** |
+
+   - dx は上表の検討済みの範囲から選ぶこと。安易に粗くすると (b)(c) の両方に抵触する
+   - dx=28.0 のメモリは **37.066 GByte** (Carpet 申告) / RSS 35.8 GiB を実測。
+     公式 140 GB × f³ の外挿 (~45 GB) より良好だった
+   - 低解像度 parfile の生成は
+     `scripts/make_smoke_par.sh <dx> [itlast] [levels] [checkpoint_id]`
+     (上流 parfile は再配布しないため、生成スクリプト側を版管理する)
 2. **Fuka/KadathImporter と Fuka/KadathThorn は Kruskal (ET_2025_05) manifest に
    `#DISABLED` として収載済み**。有効化 (ギャラリーの sed コマンド参照) +
    Boost thorn 追記で、GW150914 repo の Docker ビルド基盤が流用できる。
@@ -78,11 +102,27 @@
 4. **checkpoint 構成は GW150914 と同型** (CarpetIOHDF5, `recover=autoprobe`,
    `../CHECKPOINTS`)。spot 用に `IO::checkpoint_every_walltime_hours = 29`
    を 0.5〜1.0 に変更する
-5. **最重要リスク: np≥2 での HDF5 checkpoint lock**。GW150914 ローカル環境では
-   HDF5 1.10.4 + np≥2 で POSIX lock 衝突が発生した (np=1 は問題なし)。
-   公式 BH-NS は np=256 で走っているため上流環境では成立しているが、
-   自前 Docker スタックでの np≥2 checkpoint write/restart 検証が
-   クラウド移行の前提条件 (Phase 2 の go/no-go)
+5. **【解決済み】np≥2 問題の真因は MPI 二重リンクだった** (Phase 1 で判明)。
+   GW150914 から引き継いだ Dockerfile は `update-alternatives --set mpi → mpich`
+   を **Cactus ビルドより後**に置いていたため、ビルド時には `/usr/bin/mpic++` が
+   Open MPI を指し、Cactus と ADIOS2 が Open MPI を、HDF5 が MPICH を掴んで
+   **1 バイナリに 2 つの MPI スタックが同時にリンク**されていた。
+   MPICH の hydra から起動すると Open MPI 側の `MPI_Init` が singleton 初期化に
+   フォールバックし、各プロセスが**独立した 1-rank ジョブ**として走る
+   (ログに `Carpet is running on 1 processes` が rank 数だけ出る)。
+   - GW150914 で記録された「np≥2 の HDF5 POSIX lock 衝突」は、独立した N 個の
+     ジョブが同一 checkpoint ファイルを開いていただけ。HDF5 1.10.4 のバグではない
+   - 同じく「np≥2 の OOM」は各 rank がフルグリッドを確保していたため。
+     np=1 の peak 43 GiB × 2 = 86 GiB > 上限 80 GiB と数値が一致する。
+     当時の説明 (Multipole/WeylScal4 バッファの複製) は誤診
+   - GW150914 の本番 run は全て np=1 なので**計算結果自体は正しい**
+   - **対策**: alternatives の MPICH 固定を全ビルドより前に移動、ADIOS2/openPMD の
+     CMake に MPI コンパイラを明示、さらに `ldd` によるビルド時アサーションを追加
+     (Open MPI が混入したらビルドを失敗させる)
+   - **検証方法**: `MPI_Init` の成否では不十分。`make docker-check` が
+     `par/mpi_check.par` を np=2 で走らせ、Carpet が報告する process 数を検証する
+   - Phase 2 の go/no-go は依然 np≥2 の checkpoint write/restart 実証だが、
+     公式と同じ pure MPI 構成が使える見込みになった
 6. NS 解像度の目安: フル解像度で ~55 点/NS 半径、0.686× で ~38 点、
    0.571× で ~31 点。低解像度では潮汐破壊 vs plunge の定性が変わりうる点に留意
 
@@ -91,8 +131,8 @@
 | Phase | 内容 | 予算 | 状態 |
 | --- | --- | --- | --- |
 | 0 | プロジェクト初期化・資材調査 | $0 | ✅ 完了 (2026-08-19) |
-| 1 | Docker image ビルド (Fuka 有効化 thornlist) | $0 | 未着手 |
-| 2 | ローカル低解像度 (dx=28) smoke + **np≥2 checkpoint 検証** | $0 | 未着手 |
+| 1 | Docker image ビルド (Fuka 有効化 thornlist) | $0 | ✅ 完了 (2026-08-19、MPI 二重リンク修正込み) |
+| 2 | ローカル低解像度 (dx=28) smoke + **np≥2 checkpoint 検証** | $0 | 🟢 go/no-go 突破 (2026-08-19、np=16 checkpoint 成功)。recover 検証が残り |
 | 3 | ローカル低解像度 run + 解析パイプライン dry-run (参照データ比較) | $0 | 未着手 |
 | 4 | クラウド Stage 1: 小型 spot で ops loop 検証 (S3 sync / 中断 / 復旧) | $5–15 | 未着手 |
 | 5 | クラウド Stage 2: c7a.48xlarge spot でフル解像度実測 → go/no-go | $10–30 | 未着手 |
@@ -101,10 +141,42 @@
 
 Phase 5 の go/no-go 基準: 実測 sec/iter からの外挿で総額が 300 USD 以内に収まること。
 
+### Phase 2 実測値 (2026-08-19、dx=28 / np=16 × OMP=1 / 16 コア)
+
+| 項目 | 実測値 | 備考 |
+| --- | --- | --- |
+| 必要メモリ | 37.066 GByte (Carpet 申告) / RSS 39.1 GiB | 推定 45 GB より良好 |
+| FUKA ID import | 1493 秒 = 24.9 分 (8 レベル合計) | rank 数でのみ短縮可。OpenMP 非対応 |
+| **evolution 速度** | **30 sec/iter** | iter 32→36 の実測。dt = 0.0875 M/iter |
+| checkpoint | **25 GB / 16 ファイル** (rank ごと 1 ファイル) | POSIX lock エラーなし |
+| AH 質量 | m_irreducible = 3.599979 | BH 3.6 M☉ と 6 桁一致 |
+
+**ローカルで 2000 M を完走する場合の外挿**: 30 sec/iter ÷ 0.0875 M/iter
+= 343 秒/M → 2000 M で **約 7.9 日**。GW150914 の stage 分割運用と同程度。
+
+**クラウド側への含意 (Phase 4–6 の計画に反映が必要)**:
+
+- **checkpoint サイズの想定が過小**。クラウド戦略の記述は「15 GB 級」を
+  前提にしているが、dx=28 で既に 25 GB。フル解像度 dx=19.2 では
+  25 × (28/19.2)³ ≈ **78 GB** になる。`checkpoint_keep = 2` なら
+  ディスク上 156 GB (EBS gp3 500 GB には収まる)
+- 78 GB の `aws s3 sync` は gp3 の読み出し帯域律速で 10 分規模。
+  **15–30 分間隔の sync は間隔の大半を占める**ため、cadence の再検討が必要
+- spot 中断の 2 分警告で新規 checkpoint を書かない方針は正しい (78 GB は論外)
+- ID import 24.9 分 (ローカル) はフル解像度・np=192 でも数十分規模で残る。
+  **spot 中断のたびに払わないよう、`IO::checkpoint_ID = "yes"` で
+  初期データを checkpoint 化してから本計算に入ること**
+
 ## クラウド実行戦略 (Phase 4–6)
 
-- **リージョン**: 起動時に spot 価格履歴で選択 (us-east-2 / us-west-2 が有力)。
-  S3 / Deep Archive も同一リージョン
+- **リージョン**: **us-west-2 に確定 (2026-08-19 実測)**。AZ は
+  **us-west-2d (`usw2-az4`)** 優先、次点 us-west-2a → us-west-2c。
+  「起動時に選択」は不可 (ECR/S3 がリージョン束縛のため実質固定)。
+  S3 / Deep Archive も同一リージョン。実測値と選定根拠は sibling repo の
+  `docs/architecture.md`「Region and instance selection」
+- **インスタンス**: c7a.48xlarge。フォールバックは m7a.48xlarge。
+  **c7i.48xlarge は代替にならない** — 192 vCPU が物理 96 コア + HT で
+  メモリ 8ch (c7a は物理 192 コア・12ch)。実質半分の機械になる
 - **計算**: c7a.48xlarge (192 core / 384 GB) spot 単一ノード。マルチノード /
   EFA 不要。spot 上限価格はオンデマンド (~$9.85/h) を天井、実効 $2–4/h 想定
 - **イメージ配布**: ローカルビルド → ECR push (5–8 GB, ~$0.8/月)
@@ -122,9 +194,17 @@ Phase 5 の go/no-go 基準: 実測 sec/iter からの外挿で総額が 300 USD
   - 注意: 課金データは 8–24 時間遅延するため、リアルタイムの暴走防止は
     **spot 上限価格 + run 完了時の自動 poweroff** が本命。Budgets は事後検知
   - 全リソースに `Project=gw230529` タグ
-- **Terraform**: 判断保留中。Phase 4–5 は AWS CLI + launch template JSON +
-  user-data シェルで実施し、それを後日の Terraform 化の仕様書とする。
-  Phase 6 開始前に再判断
+- **Terraform**: **採用決定 (2026-08-19)**。sibling repo
+  [../gw230529-einstein-toolkit-aws-tf](../gw230529-einstein-toolkit-aws-tf)
+  で管理する。当初は「Phase 4–5 は CLI + launch template JSON で実施し
+  Phase 6 前に再判断」だったが、前倒しして Terraform 化した。
+  スタックは**環境別ではなく寿命別**に 3 分割 (bootstrap / foundation /
+  compute)。compute の destroy が S3 データと ECR イメージに届かないのが要点。
+  設計根拠は同 repo の `docs/architecture.md`
+- **spot vCPU クォータ**: 【確認済み・対応不要】`L-34B43A08` は
+  us-east-1 / us-west-2 とも既に **256 vCPU**。192 vCPU の単一インスタンスは
+  そのまま起動できる。us-east-2 のみ 5 vCPU なので、同リージョンを使うなら
+  緩和申請が必要 (承認まで数時間〜数日)
 
 ## 外部データ管理
 
@@ -146,6 +226,30 @@ GW150914 repo と同じポリシー: 上流 ET 著作物は git 管理外
 このプロジェクトでは**日本語**での応答を行ってください。コード内のコメント、
 ログメッセージ、エラーメッセージ、ドキュメンテーション文字列などは**英語**で
 記述してください。
+
+### 英語で書くもの / 日本語で書くもの (プロジェクト規約)
+
+**英語必須** — リポジトリにコミットされる成果物の中身:
+
+- ソース・設定ファイルのコメント全般
+  (`Dockerfile`, `docker-compose.yml`, `.env.example`, `.dockerignore`,
+  `Makefile`, `makefiles/*.mk`, `docker/cactus.cfg`, `requirements.txt`,
+  `par/*.par`, Python/シェルスクリプト)
+- `make` ターゲットのヘルプテキスト (`## コメント`) と `echo` 出力
+- ログメッセージ、エラーメッセージ、docstring、コミットメッセージ
+- `README.md` (対外向け)
+
+**日本語で可** — 人間が読む記録:
+
+- `CLAUDE.md` (本ファイル)
+- `.claude-notes/` のセッションノート
+- チャット上の応答
+
+**重要**: 他リポジトリ (例: `../gw150914-einstein-toolkit`) からファイルを
+コピーして流用する場合も、**コピー元の日本語コメントは必ず英語に書き換える**こと。
+コピーしたファイルは「既存コード」ではなく新規成果物として扱う。
+Phase 1 で GW150914 repo から Docker 基盤を移植した際、
+日本語コメントをそのまま持ち込んで規約違反を作り込んだ実績がある。
 
 ## 開発ルール
 
