@@ -180,7 +180,7 @@ ghost zone の重複が減るため単純比例はしない。とはいえ **c7a
 | 1 | Docker image ビルド (Fuka 有効化 thornlist) | $0 | ✅ 完了 (2026-08-19、MPI 二重リンク修正込み) |
 | 2 | ローカル低解像度 (dx=28) smoke + **np≥2 checkpoint 検証** | $0 | ✅ 完了 (2026-08-20、np=16 で write / recover 双方を実証) |
 | 3 | ローカル低解像度 run **896 M まで** + 解析パイプライン dry-run (参照データ比較) | $0 | 🚧 進行中 (2026-08-20 起動、約 5 日) |
-| 4 | クラウド Stage 1: 小型 spot で ops loop 検証 (S3 sync / 中断 / 復旧) | $5–15 | 未着手 (**Phase 3 と並行実施**) |
+| 4 | クラウド Stage 1: 小型 spot で ops loop 検証 (S3 sync / 中断 / 復旧) | $5–15 | ✅ 完了 (2026-08-20、インフラ側。**実 spot 中断も捕捉**) |
 | 5 | クラウド Stage 2: c7a.48xlarge spot でフル解像度実測 → go/no-go | $10–30 | 未着手 |
 | 6 | クラウド Stage 3: 本番 (シングルノード) + クラウド内解析 + Deep Archive 格納 | $100–250 | 未着手 |
 | 7 | 3D 可視化 (オプション) | - | 未着手 |
@@ -299,13 +299,37 @@ parfile の上流からの差分は 3 行のみ (`cctk_itlast`, `out2D_every`,
   「起動時に選択」は不可 (ECR/S3 がリージョン束縛のため実質固定)。
   S3 / Deep Archive も同一リージョン。実測値と選定根拠は sibling repo の
   `docs/architecture.md`「Region and instance selection」
-- **インスタンス**: c7a.48xlarge。フォールバックは m7a.48xlarge。
+- **インスタンス**: **m7a.48xlarge (192 core / 768 GiB) が既定**
+  (2026-08-20 変更、インフラ側 Phase 4 の判断)。参照 run のメモリ実測
+  438.5 GB に対し **c7a.48xlarge の 384 GiB では足りない可能性が高い**ため。
+  192 rank なら ghost zone の重複が減るが、chunk 体積 2.5 倍でも線寸は
+  1.36 倍にしかならず下げ幅は弱い。物理コア単価は c7a 0.0155 /
+  m7a 0.0195 USD (us-west-2d spot 実測) で **+26% は OOM で run を失う
+  リスクへの保険**。c7a への降格は Phase 5 が working set を 384 GiB から
+  十分下回ると実測したときだけ。
   **c7i.48xlarge は代替にならない** — 192 vCPU が物理 96 コア + HT で
-  メモリ 8ch (c7a は物理 192 コア・12ch)。実質半分の機械になる
-- **計算**: c7a.48xlarge (192 core / 384 GB) spot **単一ノードで確定
-  (2026-08-20 決定)**。spot 上限価格はオンデマンド (~$9.85/h) を天井、
-  実効 $2–4/h 想定。マルチノードは本番から切り離す (下記)
-- **イメージ配布**: ローカルビルド → ECR push (5–8 GB, ~$0.8/月)
+  メモリ 8ch (c7a/m7a は物理 192 コア・12ch)。実質半分の機械になる
+- **計算**: spot **単一ノードで確定 (2026-08-20 決定)**。
+  spot 上限価格はオンデマンドを天井、実効は c7a 2.978 / m7a 3.747 USD/h。
+  マルチノードは本番から切り離す (下記)
+- **イメージ配布**: ローカルビルド → ECR push。
+  **ローカルの非圧縮サイズは 17 GB** (従来「5–8 GB」と記載していたのは誤り)。
+  ECR は圧縮後で課金するので 6–8 GB に収まりうるが、**初回 push 時に実測して
+  両 repo の数字を直す** (ECR 月額と再 push コストの見積りがこの値に乗る)
+- **クラウド用 parfile の必須要件** (インフラ側は parfile を書き換えない。
+  書き換えるのは `.info` の `eosfile` のみ):
+
+  ```text
+  IO::checkpoint_ID                   = "yes"   # ID import 24.9 分を中断のたびに払わない
+  IO::checkpoint_every_walltime_hours = 1.0     # 6 は spot には長すぎる
+  IO::checkpoint_keep                 = 2
+  IO::recover                         = "autoprobe"
+  ```
+
+  `scripts/make_smoke_par.sh 19.2 <itlast> 8 yes 1.0 <out2d>` で全部満たせる
+  (keep と recover は上流のまま)。ローカル Phase 3 が 6 時間なのは
+  無人 run のホスト障害対策で、**spot では中断の期待損失が
+  `checkpoint間隔/2 + sync間隔/2` なので 1.0 でなければならない**
 - **データ正本は S3**: EBS gp3 (500 GB / 1000 MB/s / 4000 IOPS) は作業領域。
   sidecar タイマーで **5 分毎**に sync、**checkpoint は 1 時間毎**。
   checkpoint は `slot-a` / `slot-b` の 2 面交互 + `CURRENT` マーカー方式
@@ -322,12 +346,21 @@ parfile の上流からの差分は 3 行のみ (`cctk_itlast`, `out2D_every`,
     **2 本作成して $50/$100/$150/$200/$250/$300 の 6 閾値**をカバー
   - **Cost Anomaly Detection** (無料) を有効化して急激な課金増を検知
   - **【要注意 2026-08-20】core-hours の想定が 2 倍に増えた**。参照実測
-    14,600 core-hours (t=2000 M) から外挿すると、c7a の per-core 性能が
-    参照クラスタ比 1.5–2 倍として 192 コアで **40–76 時間 → spot $80–240**。
-    Phase 6 の $100–250 枠は成立するが余裕は薄い。
-    **合体が 713 M なので、本番を 2000 M ではなく ~1500 M で打ち切れば
-    約 25% 節約でき、ringdown は余裕で収まる**。ポストマージャー円盤に
-    どこまで踏み込むか次第なので、Phase 5 の実測を見てから決める
+    14,600 core-hours (t=2000 M) ÷ 192 コア、per-core 性能を参照比 1.0–2.0 倍
+    と仮定した見積り (インフラ側算出):
+
+    | | 38 h | 51 h | 76 h |
+    | --- | --- | --- | --- |
+    | c7a @ 2.978 USD/h | 113 USD | 152 USD | 226 USD |
+    | m7a @ 3.747 USD/h | 142 USD | 190 USD | **285 USD** |
+
+    **悲観端は 300 USD 枠を使い切る**。逃げ道は**合体が t≈713 M なので
+    2000 M ではなく ~1500 M で打ち切る** (約 25% 節約)。ringdown は余裕で
+    収まる。Phase 3 が 896 M で IMR を通すので、その結果が判断材料になる
+  - **sec/iter は最低 1 時間回してから外挿すること**。Phase 2 で iter 32→36 の
+    早期サンプルが平均を 44% 過小評価した前例がある。加えて知見 7 の
+    `OMP_NUM_THREADS` 未設定は**遅くなるだけで失敗しない**ため、
+    測定前に `threads per process` が 1 であることを必ず確認する
   - 注意: 課金データは 8–24 時間遅延するため、リアルタイムの暴走防止は
     **spot 上限価格 + run 完了時の自動 poweroff** が本命。Budgets は事後検知
   - 全リソースに `Project=gw230529` タグ
