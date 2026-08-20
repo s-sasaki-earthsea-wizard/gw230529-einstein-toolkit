@@ -154,6 +154,23 @@ ghost zone の重複が減るため単純比例はしない。とはいえ **c7a
      公式と同じ pure MPI 構成が使える見込みになった
 6. NS 解像度の目安: フル解像度で ~55 点/NS 半径、0.686× で ~38 点、
    0.571× で ~31 点。低解像度では潮汐破壊 vs plunge の定性が変わりうる点に留意
+7. **【重要 2026-08-20 実測】`OMP_NUM_THREADS` を明示しないと 65 倍遅くなる**。
+   Cactus は OpenMP 有効でビルドされているため、未設定だと**各 rank が
+   「見えているコア数」だけスレッドを起動する**。np=16 を 16 コアで走らせると
+   **16 rank × 16 threads = 256 スレッドが 16 コアを奪い合う**。
+   - **失敗せず、遅くなるだけ**なのが最悪の性質。NaN も異常終了も出ない
+   - 実測: 0.113 M/hour (2790 sec/iter) 対 正常時 6.9–7.2 M/hour (43–46 sec/iter)。
+     checkpoint recover も 56 秒が **5 時間以上**に伸びた
+   - 検知方法は起動ログの `INFO (Carpet): There are N threads per process`。
+     **pure MPI なら必ず 1**。`There are 16 threads in total` (= rank 数) も確認
+   - 対策として **Dockerfile に `ENV OMP_NUM_THREADS=1` を焼き込んだ**
+     (2026-08-20)。ただし**この修正を含むイメージは未ビルド**なので、
+     再ビルドまでは起動コマンド側で明示すること
+   - **クラウドではさらに深刻**。192 rank × 192 threads = 36,864 スレッドになる。
+     Phase 5 は sec/iter を測る場なので、これに気づかないと
+     **go/no-go を誤った数字で判断する**
+   - 併せて `cactus_sim` は PATH に無い (実体 `/home/etuser/Cactus/exe/cactus_sim`)。
+     こちらも Dockerfile の `ENV PATH` で対処済み (未ビルド)
 
 ## Phase 計画
 
@@ -195,11 +212,17 @@ Phase 5 の go/no-go 基準: 実測 sec/iter からの外挿で総額が 300 USD
 ```bash
 bash scripts/make_smoke_par.sh 28.0 10240 8 no 6 512
 docker exec -d gw230529-et bash -lc \
-  'cd /home/etuser/simulations/dx28/run && \
-   { /usr/bin/time -v mpirun.mpich -np 16 /home/etuser/Cactus/exe/cactus_sim \
+  'cd /home/etuser/simulations/dx28/run && export OMP_NUM_THREADS=1 && \
+   { /usr/bin/time -v mpirun.mpich -genv OMP_NUM_THREADS 1 -np 16 \
+     /home/etuser/Cactus/exe/cactus_sim \
      /home/etuser/work/upstream/par-smoke/bhns_smoke_dx28p0_l8_it10240.par; \
      echo "PHASE3 EXIT: $?"; } > run_it10240.log 2>&1'
 ```
+
+**`OMP_NUM_THREADS=1` は必須** (知見 7)。最初の起動でこれを落として
+5 時間 55 分を無駄にした。起動したら必ず
+`grep "threads per process" run_it10240.log` が **1** を返すことを確認する。
+`-genv` は MPICH の hydra が全 rank に環境変数を配る指定。
 
 parfile の上流からの差分は 3 行のみ (`cctk_itlast`, `out2D_every`,
 `checkpoint_every_walltime_hours`)。後ろ 2 つは Phase 3 のために
