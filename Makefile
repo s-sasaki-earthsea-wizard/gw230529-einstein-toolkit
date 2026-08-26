@@ -3,13 +3,15 @@
 # GW230529 BH-NS Einstein Toolkit Simulation
 # ==========================================
 # Run `make help` for the list of targets.
-# Functionality is split across sub-makefiles under makefiles/.
-# Only docker.mk exists as of Phase 1; sim and analyze follow in Phase 2+.
+# Functionality is split across sub-makefiles under makefiles/:
+# docker.mk (image and container lifecycle) and analyze.mk
+# (run-vs-reference post-processing).
 
 .DEFAULT_GOAL := help
 
 # Include the sub-makefiles.
 include makefiles/docker.mk
+include makefiles/analyze.mk
 
 .PHONY: help
 help: ## Show this help
