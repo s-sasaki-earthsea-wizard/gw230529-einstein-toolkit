@@ -286,6 +286,21 @@ RUN ./simfactory/bin/sim build \
 # ============================================================
 # Runtime configuration
 # ============================================================
+
+# Pin pure MPI. Cactus is built with OpenMP enabled and the reference setup
+# runs one thread per rank, but an unset OMP_NUM_THREADS makes every rank
+# spawn one thread per visible core: 16 ranks on 16 cores becomes 256 threads
+# contending for 16 cores. It does not fail, it just runs about 65 times
+# slower -- 0.11 M/hour against the 7.2 M/hour measured in Phase 2 -- and a
+# 192 rank cloud instance would compound it to 36,864 threads. Pinning it in
+# the image means neither a local invocation nor a launch template has to
+# remember. Override it explicitly if a hybrid MPI+OpenMP run is ever wanted.
+ENV OMP_NUM_THREADS=1
+
+# The Cactus executable lives outside the default PATH, so any command written
+# as a bare `cactus_sim` fails with "command not found".
+ENV PATH=/home/etuser/Cactus/exe:${PATH}
+
 WORKDIR /home/etuser/work
 
 EXPOSE 8888

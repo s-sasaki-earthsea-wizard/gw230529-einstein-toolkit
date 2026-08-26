@@ -12,12 +12,22 @@
 # Results derived from the upstream parfile must cite arXiv:2603.07374.
 #
 # Usage:
-#   scripts/make_smoke_par.sh <dx> [itlast] [levels] [checkpoint_id]
+#   scripts/make_smoke_par.sh <dx> [itlast] [levels] [checkpoint_id] \
+#                             [checkpoint_hours] [out2d_every]
 #
 # Example:
 #   scripts/make_smoke_par.sh 28.0 256 8 yes  # dev resolution, checkpoint the ID
 #   scripts/make_smoke_par.sh 67.2 256 5      # fast smoke, 5 refinement levels
 #   scripts/make_smoke_par.sh 67.2 256        # cheap smoke, upstream's 8 levels
+#   scripts/make_smoke_par.sh 28.0 10240 8 no 6 512   # multi-day Phase 3 run
+#
+# checkpoint_hours and out2d_every override the upstream cadences and default
+# to leaving them alone. Upstream targets a 30 h batch job on COSMA8, so it
+# checkpoints every 29 walltime hours; a multi-day unattended run wants
+# something far shorter, because a host crash costs a whole checkpoint
+# interval. A checkpoint costs about 60 s at dx=28, so 6 h is a 0.3 % tax.
+# out2d_every trades disk for comparison points against the reference run,
+# whose rho.xy.h5 lands every 1024 iterations at dt=0.06 M, i.e. every 61.4 M.
 #
 # checkpoint_id=yes adds ``IO::checkpoint_ID = "yes"``, which writes a
 # checkpoint straight after the initial data is set up. That matters because
@@ -72,9 +82,11 @@ DX="${1:-}"
 ITLAST="${2:-256}"
 LEVELS="${3:-8}"
 CHECKPOINT_ID="${4:-no}"
+CHECKPOINT_HOURS="${5:-}"
+OUT2D_EVERY="${6:-}"
 
 if [[ -z "${DX}" ]]; then
-    echo "usage: $0 <dx> [itlast] [levels] [checkpoint_id]" >&2
+    echo "usage: $0 <dx> [itlast] [levels] [checkpoint_id] [checkpoint_hours] [out2d_every]" >&2
     exit 2
 fi
 
@@ -85,6 +97,16 @@ fi
 
 if [[ "${CHECKPOINT_ID}" != "yes" && "${CHECKPOINT_ID}" != "no" ]]; then
     echo "error: checkpoint_id must be 'yes' or 'no'" >&2
+    exit 2
+fi
+
+if [[ -n "${CHECKPOINT_HOURS}" && ! "${CHECKPOINT_HOURS}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "error: checkpoint_hours must be a non-negative number" >&2
+    exit 2
+fi
+
+if [[ -n "${OUT2D_EVERY}" && ! "${OUT2D_EVERY}" =~ ^[0-9]+$ ]]; then
+    echo "error: out2d_every must be a non-negative integer" >&2
     exit 2
 fi
 
@@ -114,7 +136,21 @@ fi
 CELLS="$(python3 -c "print(int(round(1344.0/float('${DX}'))))")"
 
 OUT_DIR="${REPO_ROOT}/upstream/par-smoke"
-OUT_PAR="${OUT_DIR}/bhns_smoke_dx${DX/./p}_l${LEVELS}$([[ "${CHECKPOINT_ID}" == "yes" ]] && echo "_ckid").par"
+
+# Build the suffix with a plain if rather than `$(cond && echo ...)`: under
+# `set -e` the substitution would exit non-zero whenever the condition is
+# false, taking the whole script with it.
+CKID_SUFFIX=""
+if [[ "${CHECKPOINT_ID}" == "yes" ]]; then
+    CKID_SUFFIX="_ckid"
+fi
+
+# The iteration count is part of the name because runs at one resolution are
+# routinely restarted with a longer horizon, and autoprobe recovery keys off
+# the checkpoint directory rather than the parfile. Overwriting the parfile
+# that produced an existing checkpoint set would erase the record of how that
+# checkpoint was made.
+OUT_PAR="${OUT_DIR}/bhns_smoke_dx${DX/./p}_l${LEVELS}_it${ITLAST}${CKID_SUFFIX}.par"
 mkdir -p "${OUT_DIR}"
 
 # Rewrite four things relative to the upstream parfile:
@@ -122,15 +158,30 @@ mkdir -p "${OUT_DIR}"
 #   - the coarse grid spacing
 #   - the termination condition, from physical time to a fixed iteration count
 #   - the refinement level count, when asked for fewer than upstream's 8
-sed \
-    -e "s|^kadathimporter::filename= \"/path/to/\(.*\)\"|kadathimporter::filename= \"${ID_DIR_CONTAINER}/\1\"|" \
-    -e "s|^coordbase::dx  *= 19.2|coordbase::dx                            = ${DX}|" \
-    -e "s|^coordbase::dy  *= 19.2|coordbase::dy                            = ${DX}|" \
-    -e "s|^coordbase::dz  *= 19.2|coordbase::dz                            = ${DX}|" \
-    -e "s|^Cactus::terminate\t= \"time\"|Cactus::terminate = \"iteration\"\nCactus::cctk_itlast = ${ITLAST}|" \
-    -e "s|^Carpet::max_refinement_levels  *= 8$|Carpet::max_refinement_levels            = ${LEVELS}|" \
-    -e "s|^Carpetregrid2::num_levels_\([123]\)  *= 8$|Carpetregrid2::num_levels_\1              = ${LEVELS}|" \
-    "${UPSTREAM_PAR}" > "${OUT_PAR}"
+# Optionally also the checkpoint and 2D output cadences.
+SED_ARGS=(
+    -e "s|^kadathimporter::filename= \"/path/to/\(.*\)\"|kadathimporter::filename= \"${ID_DIR_CONTAINER}/\1\"|"
+    -e "s|^coordbase::dx  *= 19.2|coordbase::dx                            = ${DX}|"
+    -e "s|^coordbase::dy  *= 19.2|coordbase::dy                            = ${DX}|"
+    -e "s|^coordbase::dz  *= 19.2|coordbase::dz                            = ${DX}|"
+    -e "s|^Cactus::terminate\t= \"time\"|Cactus::terminate = \"iteration\"\nCactus::cctk_itlast = ${ITLAST}|"
+    -e "s|^Carpet::max_refinement_levels  *= 8$|Carpet::max_refinement_levels            = ${LEVELS}|"
+    -e "s|^Carpetregrid2::num_levels_\([123]\)  *= 8$|Carpetregrid2::num_levels_\1              = ${LEVELS}|"
+)
+
+if [[ -n "${CHECKPOINT_HOURS}" ]]; then
+    SED_ARGS+=(
+        -e "s|^IO::checkpoint_every_walltime_hours  *= 29$|IO::checkpoint_every_walltime_hours = ${CHECKPOINT_HOURS}|"
+    )
+fi
+
+if [[ -n "${OUT2D_EVERY}" ]]; then
+    SED_ARGS+=(
+        -e "s|^IOHDF5::out2D_every  *= 1024$|IOHDF5::out2D_every                     = ${OUT2D_EVERY}|"
+    )
+fi
+
+sed "${SED_ARGS[@]}" "${UPSTREAM_PAR}" > "${OUT_PAR}"
 
 # The upstream parfile never mentions IO::checkpoint_ID, so append rather than
 # substitute. Cactus rejects a parameter that is set twice, hence the guard.
@@ -154,12 +205,25 @@ grep -q "^Carpet::max_refinement_levels  *= ${LEVELS}$" "${OUT_PAR}" \
     || { echo "error: refinement level substitution failed" >&2; exit 1; }
 [[ "$(grep -c "^Carpetregrid2::num_levels_[123]  *= ${LEVELS}$" "${OUT_PAR}")" == "3" ]] \
     || { echo "error: per-centre refinement level substitution failed" >&2; exit 1; }
+if [[ -n "${CHECKPOINT_HOURS}" ]]; then
+    grep -q "^IO::checkpoint_every_walltime_hours = ${CHECKPOINT_HOURS}$" "${OUT_PAR}" \
+        || { echo "error: checkpoint interval substitution failed" >&2; exit 1; }
+fi
+if [[ -n "${OUT2D_EVERY}" ]]; then
+    grep -q "^IOHDF5::out2D_every  *= ${OUT2D_EVERY}$" "${OUT_PAR}" \
+        || { echo "error: 2D output interval substitution failed" >&2; exit 1; }
+fi
+
+# dt is set on the finest grid: dtfac * dx / 2**(levels-1).
+DT="$(python3 -c "print(0.4 * float('${DX}') / 2**(int('${LEVELS}') - 1))")"
 
 echo "wrote ${OUT_PAR}"
 echo "  coarse grid : dx = ${DX} M, ${CELLS} cells across +/-672 M"
 echo "  finest grid : dx = $(python3 -c "print(float('${DX}')/2**(int('${LEVELS}')-1))") M (${LEVELS} refinement levels)"
-echo "  terminates  : iteration ${ITLAST}"
+echo "  terminates  : iteration ${ITLAST} (dt = ${DT} M, t_final = $(python3 -c "print(${DT} * int('${ITLAST}'))") M)"
 echo "  ID checkpoint: ${CHECKPOINT_ID}"
+echo "  checkpoint every: ${CHECKPOINT_HOURS:-29 (upstream)} walltime hours"
+echo "  2D output every : ${OUT2D_EVERY:-1024 (upstream)} iterations"
 echo ""
 echo "Choose the MPI rank count to suit ${CELLS} coarse cells; too many ranks"
 echo "abort at startup with an inconsistent grid structure at ml=0 rl=0."
