@@ -73,6 +73,11 @@ ghost zone の重複が減るため単純比例はしない。とはいえ **c7a
 **go/no-go を左右する関門**として扱うこと。np=192 でメモリが載らない場合、
 マルチノード化は「学習目的の選択肢」から「必要条件」に格上げされる。
 
+**【決着 2026-08-21 実測】この懸念は杞憂だった**。np=192 のフルレゾ probe で
+Carpet 申告 125.3 GByte / ノード RSS 137 GiB。480 rank の 438.5 GB は
+ghost zone の重複が支配的だったということ。**c7a.48xlarge の 384 GiB で
+十分な余裕があり、マルチノード化は「必要条件」にならない**。
+
 ## 技術スタック
 
 - **初期データ**: FUKA/Kadath の**事前計算済み解を import** (KadathImporter /
@@ -179,16 +184,21 @@ ghost zone の重複が減るため単純比例はしない。とはいえ **c7a
 | 0 | プロジェクト初期化・資材調査 | $0 | ✅ 完了 (2026-08-19) |
 | 1 | Docker image ビルド (Fuka 有効化 thornlist) | $0 | ✅ 完了 (2026-08-19、MPI 二重リンク修正込み) |
 | 2 | ローカル低解像度 (dx=28) smoke + **np≥2 checkpoint 検証** | $0 | ✅ 完了 (2026-08-20、np=16 で write / recover 双方を実証) |
-| 3 | ローカル低解像度 run **896 M まで** + 解析パイプライン dry-run (参照データ比較) | $0 | 🚧 進行中 (2026-08-20 起動、約 5 日) |
+| 3 | ローカル低解像度 run **896 M まで** + 解析パイプライン dry-run (参照データ比較) | $0 | ✅ 完了 (2026-08-25 完走、2026-08-26 解析。下記「Phase 3 の結果」) |
 | 4 | クラウド Stage 1: 小型 spot で ops loop 検証 (S3 sync / 中断 / 復旧) | $5–15 | ✅ 完了 (2026-08-20、インフラ側。**実 spot 中断も捕捉**) |
-| 5 | クラウド Stage 2: c7a.48xlarge spot でフル解像度実測 → go/no-go | $10–30 | 未着手 |
+| 5 | クラウド Stage 2: c7a.48xlarge spot でフル解像度実測 → go/no-go | $10–30 | 🚧 ほぼ完了 (2026-08-21 実測 $7.1。**4.16 sec/iter → 2000 M で 38.5 h / 115 USD、go 圏内**。残は recover のクラウド検証 = インフラ issue #3) |
 | 6 | クラウド Stage 3: 本番 (シングルノード) + クラウド内解析 + Deep Archive 格納 | $100–250 | 未着手 |
 | 7 | 3D 可視化 (オプション) | - | 未着手 |
 | 8 | **マルチノード MPI 実験** (本番とは切り離した学習目的) | $10–20 | 未着手 (Phase 6 の後) |
 
 Phase 5 の go/no-go 基準: 実測 sec/iter からの外挿で総額が 300 USD 以内に収まること。
-**Phase 3 と Phase 4 は独立**なので、5 日の run を焼いている間に ops loop の
-検証を並行して進める。
+**→ 2026-08-21 のフルレゾ probe (dx=19.2 / np=192 / c7a.48xlarge、90 分) で実測済み**:
+4.16 sec/iter (壁時計平均、checkpoint 税 +10.9% 込み)、メモリは Carpet 125.3 GByte /
+ノード RSS 137 GiB。**c7a.48xlarge の 384 GiB に対し余裕があり、t=2000 M でも
+38.5 h / 115 USD と予算内に収まる**。詳細はインフラ repo の
+`2026-08-21-full-resolution-throughput.md`。ただし測定は t=0–63 M の純 inspiral で、
+merger 期のコスト増は未測定 (38.5 h は下限に近い値として扱う。もっとも Phase 3 の
+ローレゾ実測では merger 期の減速は観測されなかった — 下記)。
 
 ### Phase 3 の方針: 2000 M 完走ではなく 896 M で打ち切る (2026-08-20 決定)
 
@@ -223,6 +233,42 @@ docker exec -d gw230529-et bash -lc \
 5 時間 55 分を無駄にした。起動したら必ず
 `grep "threads per process" run_it10240.log` が **1** を返すことを確認する。
 `-genv` は MPICH の hydra が全 rank に環境変数を配る指定。
+
+### Phase 3 の結果 (2026-08-25 完走 / 2026-08-26 解析)
+
+**run 実績**: it_264 の checkpoint から recover して 2026-08-20 起動、
+2026-08-25 01:06 UTC に it=10240 / t=896 M へ正常終了 (exit 0)。
+9976 iteration を wall clock 115h17m で消化 = **41.6 sec/iter**
+(起動 + recover + 6 時間ごと checkpoint 込み)。見積り 43 sec/iter を下回り、
+**merger 期 (regrid + AHFinder 負荷増) でも減速は観測されなかった**。
+これは Phase 5 実測 (t=0–63 M の純 inspiral) を 2000 M へ外挿する際の
+不安材料を 1 つ消す材料になる。
+
+**解析パイプライン**: `scripts/analyze_phase3.py` (コンテナ内で実行、
+kuibit で 2D AMR を読む)。`make analyze-phase3` 1 発で図 4 枚 +
+`reports/phase3/summary.md` を生成する。Phase 6 のクラウド内解析の
+リハーサルを兼ねる。
+
+**参照データ (bhns_20252103, dx=19.2) との比較**:
+
+| 項目 | run (dx=28) | 参照 (dx=19.2) |
+| --- | --- | --- |
+| 合体時刻 (ソースフレーム、\|ψ4\| ピーク) | **697.4 M** (r=100 抽出から) | 713.3 M (r=500 から) |
+| ずれ | **-15.8 M = -2.2%** | — |
+| 共通ホライズン (ah2) 初検出 | 679.0 M | — (tarball に AH データなし) |
+| 残骸 BH の m_irr (t=896 M) | 4.384 M☉ | — |
+| NS バリオン質量保存 (inspiral, t<600 M) | drift 2.05% | — |
+| 合体後に NS 追跡球へ残る質量 | 4.0% (円盤/テール) | — |
+
+- **ψ4 の inspiral 波形 (r=500、retarded time) は参照とほぼ重なる**。
+  注意: r=500 抽出には合体波が届かない (到達は t=1213 M > 896 M)。
+  合体を含むのは r=100 抽出のみ
+- **2D 密度 (xy 面) の潮汐破壊の形態が 4 時刻すべてで参照と定性一致**
+  (NS → 潮汐伸長 → 三日月状破壊 → 残骸テール/円盤)。知見 6 の懸念
+  「ローレゾで潮汐破壊 vs plunge の定性が変わる」は **dx=28 では顕在化しない**
+- **本番 1500 M 打ち切り案への含意**: run では merger + ~180 M で ah2 質量が
+  平坦化し、残骸円盤の形成まで見えた。1500 M (= merger + ~790 M) なら
+  IMR + 初期円盤進化まで余裕で収まる
 
 parfile の上流からの差分は 3 行のみ (`cctk_itlast`, `out2D_every`,
 `checkpoint_every_walltime_hours`)。後ろ 2 つは Phase 3 のために
@@ -299,14 +345,12 @@ parfile の上流からの差分は 3 行のみ (`cctk_itlast`, `out2D_every`,
   「起動時に選択」は不可 (ECR/S3 がリージョン束縛のため実質固定)。
   S3 / Deep Archive も同一リージョン。実測値と選定根拠は sibling repo の
   `docs/architecture.md`「Region and instance selection」
-- **インスタンス**: **m7a.48xlarge (192 core / 768 GiB) が既定**
-  (2026-08-20 変更、インフラ側 Phase 4 の判断)。参照 run のメモリ実測
-  438.5 GB に対し **c7a.48xlarge の 384 GiB では足りない可能性が高い**ため。
-  192 rank なら ghost zone の重複が減るが、chunk 体積 2.5 倍でも線寸は
-  1.36 倍にしかならず下げ幅は弱い。物理コア単価は c7a 0.0155 /
-  m7a 0.0195 USD (us-west-2d spot 実測) で **+26% は OOM で run を失う
-  リスクへの保険**。c7a への降格は Phase 5 が working set を 384 GiB から
-  十分下回ると実測したときだけ。
+- **インスタンス**: **c7a.48xlarge (192 core / 384 GiB) に確定**
+  (2026-08-21 変更、インフラ側 commit `12c5c5c`)。一時 m7a.48xlarge (768 GiB) を
+  既定にしていた (参照 run の 438.5 GB 実測から OOM を警戒) が、
+  Phase 5 の np=192 実測でノード RSS 137 GiB と判明し、
+  「working set が 384 GiB を十分下回ったら c7a に降格」の条件が成立した。
+  spot 実効 c7a 2.978 / m7a 3.747 USD/h。
   **c7i.48xlarge は代替にならない** — 192 vCPU が物理 96 コア + HT で
   メモリ 8ch (c7a/m7a は物理 192 コア・12ch)。実質半分の機械になる
 - **計算**: spot **単一ノードで確定 (2026-08-20 決定)**。
@@ -357,6 +401,11 @@ parfile の上流からの差分は 3 行のみ (`cctk_itlast`, `out2D_every`,
     **悲観端は 300 USD 枠を使い切る**。逃げ道は**合体が t≈713 M なので
     2000 M ではなく ~1500 M で打ち切る** (約 25% 節約)。ringdown は余裕で
     収まる。Phase 3 が 896 M で IMR を通すので、その結果が判断材料になる
+  - **【実測で更新 2026-08-21/26】上表は実測で楽観端に確定した**。
+    フルレゾ probe の実測 4.16 sec/iter → **t=2000 M で 38.5 h / 115 USD**
+    (c7a)。1500 M 打ち切りなら **約 29 h / 86 USD**。probe は inspiral のみの
+    測定だが、Phase 3 のローレゾ完走では merger 期の減速が観測されなかったため、
+    大幅な上振れは考えにくい。本番 run 中も `make throughput` で監視する
   - **sec/iter は最低 1 時間回してから外挿すること**。Phase 2 で iter 32→36 の
     早期サンプルが平均を 44% 過小評価した前例がある。加えて知見 7 の
     `OMP_NUM_THREADS` 未設定は**遅くなるだけで失敗しない**ため、
