@@ -38,9 +38,11 @@ Completed so far:
 - **Phase 3** — a reduced-resolution (dx=28 M, 0.686x) run on 16 local cores
   to t=896 M (4.8 days wall clock), covering inspiral, merger and ringdown.
   `make analyze-phase3` compares it against the official reference dataset:
-  the merger time agrees to 2.2% (697 M vs 713 M), the l=2 m=2 inspiral
-  waveform overlays the reference, and the 2D density evolution reproduces
-  the tidal disruption morphology at this resolution.
+  the merger time agrees to about 1 M (675 M vs 674 M, tortoise-corrected
+  retarded time), the l=2 m=2 inspiral waveform overlays the reference, and
+  the maximum rest-mass density tracks the reference to within a few percent
+  in coordinate time, with the 2D density evolution reproducing the tidal
+  disruption morphology at this resolution.
 - **Phase 4/5 (infrastructure)** — spot-interruption ops loop validated and
   full-resolution throughput and memory measured in the cloud; see the
   [companion Terraform repository](https://github.com/s-sasaki-earthsea-wizard/gw230529-einstein-toolkit-aws-tf).
